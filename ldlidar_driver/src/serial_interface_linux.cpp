@@ -44,9 +44,9 @@ bool SerialInterfaceLinux::Open(std::string &port_name, uint32_t com_baudrate) {
 
   com_baudrate_ = com_baudrate;
 
-  struct asmtermios::termios2 options;
-  if (ioctl(com_handle_, _IOC(_IOC_READ, 'T', 0x2A, sizeof(struct asmtermios::termios2)), &options)) {
-    LD_LOG_ERROR("TCGETS2 first error,%s", strerror(errno));
+  struct termios options;
+  if (-1 == tcgetattr(com_handle_, &options)) {
+    LD_LOG_ERROR("tcgetattr error,%s", strerror(errno));
     if (com_handle_ != -1) {
       close(com_handle_);
       com_handle_ = -1;
@@ -61,16 +61,11 @@ bool SerialInterfaceLinux::Open(std::string &port_name, uint32_t com_baudrate) {
   options.c_oflag &= (tcflag_t) ~(OPOST);
   options.c_iflag &= (tcflag_t) ~(IXON | IXOFF | INLCR | IGNCR | ICRNL | IGNBRK);
 
-  options.c_cflag &= ~CBAUD;
-  options.c_cflag |= BOTHER;
-  options.c_ispeed = this->com_baudrate_;
-  options.c_ospeed = this->com_baudrate_;
-
   options.c_cc[VMIN] = 0;
   options.c_cc[VTIME] = 0;
 
-  if (ioctl(com_handle_, _IOC(_IOC_WRITE, 'T', 0x2B, sizeof(struct asmtermios::termios2)), &options)) {
-    LD_LOG_ERROR("TCSETS2 error,%s", strerror(errno));
+  if (tcsetattr(com_handle_, TCSANOW, &options) < 0) {
+    LD_LOG_ERROR("tcsetattr error,%s", strerror(errno));
     if (com_handle_ != -1) {
       close(com_handle_);
       com_handle_ = -1;
@@ -78,14 +73,22 @@ bool SerialInterfaceLinux::Open(std::string &port_name, uint32_t com_baudrate) {
     return false;
   }
 
-  if (ioctl(com_handle_, _IOC(_IOC_READ, 'T', 0x2A, sizeof(struct asmtermios::termios2)), &options)) {
-    LD_LOG_ERROR("TCGETS2 second error,%s", strerror(errno));
+#ifdef __APPLE__
+  //IOSSIOSPEED = 0x80045402  # _IOW('T', 2, speed_t)
+#ifndef IOSSIOSPEED
+#define IOSSIOSPEED _IOW('T', 2, speed_t)
+#endif
+
+  int speed = com_baudrate_;
+  if (ioctl(com_handle_, IOSSIOSPEED, &speed) < 0) {
+    LD_LOG_ERROR("IOSSIOSPEED error,%s", strerror(errno));
     if (com_handle_ != -1) {
       close(com_handle_);
       com_handle_ = -1;
     }
     return false;
   }
+#endif
 
   LDS_LOG_INFO("Actual BaudRate reported:%d", options.c_ospeed);
 

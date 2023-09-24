@@ -108,7 +108,11 @@ private:
   LiPkg* comm_pkg_;
   SerialInterfaceLinux* comm_serial_;
   std::function<uint64_t(void)> register_get_timestamp_handle_;
+#ifdef __APPLE__
+  std::chrono::steady_clock::time_point last_pubdata_times_;
+#else
   std::chrono::_V2::steady_clock::time_point last_pubdata_times_;
+#endif
 };
 
 } // namespace ldlidar

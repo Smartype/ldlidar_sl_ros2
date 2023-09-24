@@ -27,9 +27,6 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
-namespace asmtermios {
-#include <linux/termios.h>
-}
 #include <termios.h>
 #include <unistd.h>
 
