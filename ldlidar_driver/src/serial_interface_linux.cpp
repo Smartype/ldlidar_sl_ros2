@@ -16,6 +16,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "serial_interface_linux.h"
 #include "log_module.h"
@@ -34,71 +38,105 @@ SerialInterfaceLinux::SerialInterfaceLinux()
 SerialInterfaceLinux::~SerialInterfaceLinux() { Close(); }
 
 bool SerialInterfaceLinux::Open(std::string &port_name, uint32_t com_baudrate) {
-  int flags = (O_RDWR | O_NOCTTY | O_NONBLOCK);
-
-  com_handle_ = open(port_name.c_str(), flags);
-  if (-1 == com_handle_) {
-    LD_LOG_ERROR("Open open error,%s", strerror(errno));
-    return false;
-  }
-
-  com_baudrate_ = com_baudrate;
-
-  struct termios options;
-  if (-1 == tcgetattr(com_handle_, &options)) {
-    LD_LOG_ERROR("tcgetattr error,%s", strerror(errno));
-    if (com_handle_ != -1) {
-      close(com_handle_);
-      com_handle_ = -1;
+  if (port_name.find("tcp://") == 0) {
+    std::string ip_port = port_name.substr(6);
+    size_t pos = ip_port.find(':');
+    if (pos == std::string::npos || pos == ip_port.length()) {
+      LD_LOG_ERROR("Open bad port_name", 0);
+      return false;
     }
-    return false;
-  }
 
-  options.c_cflag |= (tcflag_t)(CLOCAL | CREAD | CS8);
-  options.c_cflag &= (tcflag_t) ~(CSTOPB | PARENB);
-  options.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ECHOK | ECHONL |
-                                  ISIG | IEXTEN);  //|ECHOPRT
-  options.c_oflag &= (tcflag_t) ~(OPOST);
-  options.c_iflag &= (tcflag_t) ~(IXON | IXOFF | INLCR | IGNCR | ICRNL | IGNBRK);
-
-  options.c_cc[VMIN] = 0;
-  options.c_cc[VTIME] = 0;
-
-  if (tcsetattr(com_handle_, TCSANOW, &options) < 0) {
-    LD_LOG_ERROR("tcsetattr error,%s", strerror(errno));
-    if (com_handle_ != -1) {
-      close(com_handle_);
-      com_handle_ = -1;
+    std::string ip =ip_port.substr(0, pos);
+    std::string port =ip_port.substr(pos + 1);
+    com_handle_ = socket(AF_INET, SOCK_STREAM, 0);
+    LD_LOG_INFO("Open %s:%s", ip.c_str(), port.c_str());
+    sockaddr_in remote;
+    memset(&remote, 0, sizeof(remote));
+    remote.sin_family = AF_INET;
+    inet_pton(AF_INET, ip.c_str(), &remote.sin_addr);
+    remote.sin_port = htons(std::stoi(port));
+    socklen_t slen = sizeof(remote);
+    if (connect(com_handle_, (const struct sockaddr*)&remote, slen) < 0) {
+      LD_LOG_ERROR("Open connect error,%s", strerror(errno));
+      return false;
     }
-    return false;
+
+    int flags = fcntl(com_handle_, F_GETFL, 0);
+    flags |= O_NONBLOCK;
+    fcntl(com_handle_, F_SETFL, flags);
+
+    rx_thread_exit_flag_ = false;
+    rx_thread_ = new std::thread(RxThreadProc, this);
+    is_cmd_opened_ = true;
+
+    return true;
   }
+  else {
+    int flags = (O_RDWR | O_NOCTTY | O_NONBLOCK);
+
+    com_handle_ = open(port_name.c_str(), flags);
+    if (-1 == com_handle_) {
+      LD_LOG_ERROR("Open open error,%s", strerror(errno));
+      return false;
+    }
+
+    com_baudrate_ = com_baudrate;
+
+    struct termios options;
+    if (-1 == tcgetattr(com_handle_, &options)) {
+      LD_LOG_ERROR("tcgetattr error,%s", strerror(errno));
+      if (com_handle_ != -1) {
+        close(com_handle_);
+        com_handle_ = -1;
+      }
+      return false;
+    }
+
+    options.c_cflag |= (tcflag_t)(CLOCAL | CREAD | CS8);
+    options.c_cflag &= (tcflag_t) ~(CSTOPB | PARENB);
+    options.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ECHOK | ECHONL |
+                                    ISIG | IEXTEN);  //|ECHOPRT
+    options.c_oflag &= (tcflag_t) ~(OPOST);
+    options.c_iflag &= (tcflag_t) ~(IXON | IXOFF | INLCR | IGNCR | ICRNL | IGNBRK);
+
+    options.c_cc[VMIN] = 0;
+    options.c_cc[VTIME] = 0;
+
+    if (tcsetattr(com_handle_, TCSANOW, &options) < 0) {
+      LD_LOG_ERROR("tcsetattr error,%s", strerror(errno));
+      if (com_handle_ != -1) {
+        close(com_handle_);
+        com_handle_ = -1;
+      }
+      return false;
+    }
 
 #ifdef __APPLE__
-  //IOSSIOSPEED = 0x80045402  # _IOW('T', 2, speed_t)
+    //IOSSIOSPEED = 0x80045402  # _IOW('T', 2, speed_t)
 #ifndef IOSSIOSPEED
 #define IOSSIOSPEED _IOW('T', 2, speed_t)
 #endif
 
-  int speed = com_baudrate_;
-  if (ioctl(com_handle_, IOSSIOSPEED, &speed) < 0) {
-    LD_LOG_ERROR("IOSSIOSPEED error,%s", strerror(errno));
-    if (com_handle_ != -1) {
-      close(com_handle_);
-      com_handle_ = -1;
+    int speed = com_baudrate_;
+    if (ioctl(com_handle_, IOSSIOSPEED, &speed) < 0) {
+      LD_LOG_ERROR("IOSSIOSPEED error,%s", strerror(errno));
+      if (com_handle_ != -1) {
+        close(com_handle_);
+        com_handle_ = -1;
+      }
+      return false;
     }
-    return false;
-  }
 #endif
 
-  LDS_LOG_INFO("Actual BaudRate reported:%d", options.c_ospeed);
+    LDS_LOG_INFO("Actual BaudRate reported:%d", options.c_ospeed);
 
-  tcflush(com_handle_, TCIFLUSH);
+    tcflush(com_handle_, TCIFLUSH);
 
-  rx_thread_exit_flag_ = false;
-  rx_thread_ = new std::thread(RxThreadProc, this);
-  is_cmd_opened_ = true;
-
-  return true;
+    rx_thread_exit_flag_ = false;
+    rx_thread_ = new std::thread(RxThreadProc, this);
+    is_cmd_opened_ = true;
+    return true;
+  }
 }
 
 bool SerialInterfaceLinux::Close() {
